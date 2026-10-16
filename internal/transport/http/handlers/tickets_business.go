@@ -1,0 +1,85 @@
+package handlers
+
+import (
+	"strconv"
+
+	"pet-ticket/internal/app/tickets"
+	domain "pet-ticket/internal/domain/tickets"
+	"pet-ticket/internal/transport/http/dto"
+
+	"github.com/gofiber/fiber/v2"
+)
+
+// AssignTicketRequest запрос на назначение тикета оператору
+type AssignTicketRequest struct {
+	OperatorID int64  `json:"operatorId" validate:"required,gte=1"`
+	Comment    string `json:"comment,omitempty" validate:"omitempty,max=500"`
+}
+
+// assignTicket назначает тикет на оператора (бизнес-логика)
+func (h *TicketsHandler) assignTicket(c *fiber.Ctx) error {
+	ticketID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid ticket id")
+	}
+
+	var req AssignTicketRequest
+	if err := c.BodyParser(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+
+	// Получаем текущий userID из контекста (установлен AuthMiddleware)
+	userID := c.Locals("userID").(int64)
+
+	// Получаем тикет
+	ticket, err := h.service.GetTicket(c.UserContext(), ticketID)
+	if err != nil {
+		return err
+	}
+
+	// Проверяем, что тикет ещё не назначен (бизнес-правило)
+	if ticket.Status != domain.StatusNew {
+		return fiber.NewError(fiber.StatusConflict, "ticket already assigned or in progress")
+	}
+
+	// Обновляем статус на "in_progress"
+	status := domain.StatusInProgress
+	comment := "Assigned to operator"
+	if req.Comment != "" {
+		comment = req.Comment
+	}
+
+	updated, err := h.service.UpdateTicket(c.UserContext(), tickets.UpdateTicketInput{
+		ID:      ticketID,
+		Status:  &status,
+		Comment: &comment,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Логируем назначение
+	h.logger.Info().
+		Int64("ticketId", ticketID).
+		Int64("operatorId", req.OperatorID).
+		Int64("assignedBy", userID).
+		Msg("ticket assigned to operator")
+
+	// Здесь можно добавить:
+	// - Отправку уведомления оператору
+	// - Запись в отдельную таблицу assignments
+	// - Обновление метрик
+
+	resp := dto.ToTicketResponse(updated)
+	return c.JSON(fiber.Map{
+		"ticket":     resp,
+		"operatorId": req.OperatorID,
+		"message":    "ticket successfully assigned",
+	})
+}
+
+// escalateTicket is intentionally unfinished: Task 1 implements priority escalation.
+// A placeholder must not report success or overwrite the ticket comment.
+func (h *TicketsHandler) escalateTicket(c *fiber.Ctx) error {
+	return fiber.NewError(fiber.StatusNotImplemented, "priority escalation is Task 1; not implemented in the starter")
+}
