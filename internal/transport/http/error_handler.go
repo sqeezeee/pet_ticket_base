@@ -39,10 +39,18 @@ func NewErrorHandler(logger zerolog.Logger, env string) fiber.ErrorHandler {
 			code = fiber.StatusBadRequest
 			errorCode = "INVALID_STATUS"
 			message = "status value is not valid"
+		case errors.Is(err, tickets.ErrInvalidPriority):
+			code = fiber.StatusBadRequest
+			errorCode = "INVALID_PRIORITY"
+			message = "priority value is not valid"
 		case errors.Is(err, tickets.ErrUnauthorized):
 			code = fiber.StatusForbidden
 			errorCode = "UNAUTHORIZED"
 			message = "you don't have permission to access this resource"
+		case errors.Is(err, tickets.ErrConflict):
+			code = fiber.StatusConflict
+			errorCode = "CONFLICT"
+			message = "ticket state does not allow this operation"
 		}
 
 		// Request ID для трейсинга

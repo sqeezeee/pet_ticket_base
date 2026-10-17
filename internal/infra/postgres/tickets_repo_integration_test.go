@@ -98,10 +98,11 @@ func TestTicketsRepository_Create_Integration(t *testing.T) {
 
 	// Arrange
 	newTicket := domain.Ticket{
-		UserID:  100,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Integration test ticket",
+		UserID:   100,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Integration test ticket",
 	}
 
 	// Act
@@ -124,6 +125,9 @@ func TestTicketsRepository_Create_Integration(t *testing.T) {
 	if created.Status != newTicket.Status {
 		t.Errorf("expected status %s, got %s", newTicket.Status, created.Status)
 	}
+	if created.Priority != newTicket.Priority {
+		t.Errorf("expected priority %s, got %s", newTicket.Priority, created.Priority)
+	}
 	if created.Comment != newTicket.Comment {
 		t.Errorf("expected comment %s, got %s", newTicket.Comment, created.Comment)
 	}
@@ -144,10 +148,11 @@ func TestTicketsRepository_GetByID_Integration(t *testing.T) {
 
 	// Создаём тикет
 	created, err := repo.Create(ctx, domain.Ticket{
-		UserID:  200,
-		TopicID: 2,
-		Status:  domain.StatusNew,
-		Comment: "Test ticket for GetByID",
+		UserID:   200,
+		TopicID:  2,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Test ticket for GetByID",
 	})
 	if err != nil {
 		t.Fatalf("failed to create ticket: %v", err)
@@ -169,6 +174,25 @@ func TestTicketsRepository_GetByID_Integration(t *testing.T) {
 	}
 	if found.Comment != created.Comment {
 		t.Errorf("expected comment %s, got %s", created.Comment, found.Comment)
+	}
+	if found.Priority != domain.PriorityMedium {
+		t.Errorf("expected priority medium, got %s", found.Priority)
+	}
+}
+
+func TestTicketsPriorityDatabaseDefault_Integration(t *testing.T) {
+	db := setupTestDB(t).db
+	var priorityID int
+	err := db.conn.QueryRow(`
+		INSERT INTO tickets (user_id, topic_id, status_id, comment)
+		VALUES ($1, $2, $3, $4)
+		RETURNING priority_id
+	`, 201, 1, int(domain.StatusNew), "Database default priority").Scan(&priorityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if priorityID != int(domain.PriorityMedium) {
+		t.Fatalf("default priority_id = %d, want %d", priorityID, domain.PriorityMedium)
 	}
 }
 
@@ -197,10 +221,11 @@ func TestTicketsRepository_Update_Integration(t *testing.T) {
 
 	// Создаём тикет
 	created, err := repo.Create(ctx, domain.Ticket{
-		UserID:  300,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Original comment",
+		UserID:   300,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Original comment",
 	})
 	if err != nil {
 		t.Fatalf("failed to create ticket: %v", err)
@@ -248,10 +273,11 @@ func TestTicketsRepository_Delete_Integration(t *testing.T) {
 
 	// Создаём тикет
 	created, err := repo.Create(ctx, domain.Ticket{
-		UserID:  400,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Ticket to delete",
+		UserID:   400,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Ticket to delete",
 	})
 	if err != nil {
 		t.Fatalf("failed to create ticket: %v", err)
@@ -282,10 +308,10 @@ func TestTicketsRepository_List_Integration(t *testing.T) {
 	// Создаём несколько тикетов
 	userID := int64(500)
 	tickets := []domain.Ticket{
-		{UserID: userID, TopicID: 1, Status: domain.StatusNew, Comment: "Ticket 1"},
-		{UserID: userID, TopicID: 2, Status: domain.StatusInProgress, Comment: "Ticket 2"},
-		{UserID: userID, TopicID: 1, Status: domain.StatusNew, Comment: "Ticket 3"},
-		{UserID: 999, TopicID: 1, Status: domain.StatusNew, Comment: "Other user ticket"},
+		{UserID: userID, TopicID: 1, Status: domain.StatusNew, Priority: domain.PriorityLow, Comment: "Ticket 1"},
+		{UserID: userID, TopicID: 2, Status: domain.StatusInProgress, Priority: domain.PriorityCritical, Comment: "Ticket 2"},
+		{UserID: userID, TopicID: 1, Status: domain.StatusNew, Priority: domain.PriorityHigh, Comment: "Ticket 3"},
+		{UserID: 999, TopicID: 1, Status: domain.StatusNew, Priority: domain.PriorityMedium, Comment: "Other user ticket"},
 	}
 
 	for _, ticket := range tickets {
@@ -403,6 +429,37 @@ func TestTicketsRepository_List_Integration(t *testing.T) {
 			t.Error("expected different tickets on different pages")
 		}
 	})
+
+	t.Run("filter by priority", func(t *testing.T) {
+		priority := domain.PriorityHigh
+		list, err := repo.List(ctx, apptickets.ListFilter{UserID: &userID, Priority: &priority, Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 1 || list[0].Priority != domain.PriorityHigh {
+			t.Fatalf("unexpected priority filter result: %+v", list)
+		}
+	})
+
+	t.Run("sort by priority", func(t *testing.T) {
+		for _, desc := range []bool{false, true} {
+			list, err := repo.List(ctx, apptickets.ListFilter{
+				UserID: &userID, Limit: 10, SortBy: "priority_id", SortDesc: desc,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list) != 3 {
+				t.Fatalf("got %d tickets, want 3", len(list))
+			}
+			if desc && list[0].Priority != domain.PriorityCritical {
+				t.Fatalf("descending first priority = %s, want critical", list[0].Priority)
+			}
+			if !desc && list[0].Priority != domain.PriorityLow {
+				t.Fatalf("ascending first priority = %s, want low", list[0].Priority)
+			}
+		}
+	})
 }
 
 // TestTicketsRepository_History_Integration — работа с историей
@@ -414,10 +471,11 @@ func TestTicketsRepository_History_Integration(t *testing.T) {
 
 	// Создаём тикет
 	ticket, err := repo.Create(ctx, domain.Ticket{
-		UserID:  600,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Ticket with history",
+		UserID:   600,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Ticket with history",
 	})
 	if err != nil {
 		t.Fatalf("failed to create ticket: %v", err)
@@ -564,10 +622,11 @@ func TestTicketsRepository_Transaction_Integration(t *testing.T) {
 
 	// Создаём тикет в транзакции
 	ticket, err := repo.Create(txCtx, domain.Ticket{
-		UserID:  700,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Ticket in transaction",
+		UserID:   700,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Ticket in transaction",
 	})
 	if err != nil {
 		tx.Rollback()
@@ -626,10 +685,11 @@ func TestTicketsRepository_TransactionRollback_Integration(t *testing.T) {
 
 	// Создаём тикет в транзакции
 	ticket, err := repo.Create(txCtx, domain.Ticket{
-		UserID:  800,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Ticket to rollback",
+		UserID:   800,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Ticket to rollback",
 	})
 	if err != nil {
 		tx.Rollback()
@@ -658,10 +718,11 @@ func BenchmarkTicketsRepository_Create(b *testing.B) {
 	ctx := context.Background()
 
 	ticket := domain.Ticket{
-		UserID:  1000,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Benchmark ticket",
+		UserID:   1000,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Benchmark ticket",
 	}
 
 	b.ResetTimer()
@@ -681,10 +742,11 @@ func BenchmarkTicketsRepository_GetByID(b *testing.B) {
 
 	// Создаём тикет для бенчмарка
 	created, err := repo.Create(ctx, domain.Ticket{
-		UserID:  1001,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Benchmark ticket",
+		UserID:   1001,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Benchmark ticket",
 	})
 	if err != nil {
 		b.Fatalf("failed to create ticket: %v", err)
