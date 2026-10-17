@@ -11,10 +11,11 @@ import (
 
 // CreateTicketInput представляет входные данные для создания тикета
 type CreateTicketInput struct {
-	UserID  int64
-	TopicID int64
-	Amount  *float64
-	Comment string
+	UserID   int64
+	TopicID  int64
+	Priority *tickets.Priority
+	Amount   *float64
+	Comment  string
 }
 
 // UpdateTicketInput представляет входные данные для обновления тикета
@@ -29,6 +30,7 @@ type ListTicketsInput struct {
 	UserID   *int64
 	TopicID  *int64
 	Status   *tickets.Status
+	Priority *tickets.Priority
 	Limit    int
 	Offset   int
 	SortBy   string
@@ -40,6 +42,8 @@ type Service interface {
 	CreateTicket(ctx context.Context, input CreateTicketInput) (tickets.Ticket, error)
 	GetTicket(ctx context.Context, id int64) (tickets.Ticket, error)
 	UpdateTicket(ctx context.Context, input UpdateTicketInput) (tickets.Ticket, error)
+	UpdatePriority(ctx context.Context, ticketID int64, priority tickets.Priority) (tickets.Ticket, error)
+	EscalateTicket(ctx context.Context, ticketID int64) (tickets.Ticket, error)
 	DeleteTicket(ctx context.Context, id int64) error
 	ListTickets(ctx context.Context, input ListTicketsInput) ([]tickets.Ticket, error)
 	GetTicketHistory(ctx context.Context, ticketID int64, limit, offset int) ([]tickets.History, error)
@@ -76,13 +80,22 @@ func NewService(repo Repository, db TxBeginner, logger zerolog.Logger) Service {
 
 // CreateTicket создаёт новый тикет
 func (s *service) CreateTicket(ctx context.Context, input CreateTicketInput) (tickets.Ticket, error) {
+	priority := tickets.PriorityMedium
+	if input.Priority != nil {
+		if !input.Priority.IsValid() {
+			return tickets.Ticket{}, ErrInvalidPriority
+		}
+		priority = *input.Priority
+	}
+
 	// Создаём доменную сущность
 	ticket := tickets.Ticket{
-		UserID:  input.UserID,
-		TopicID: input.TopicID,
-		Status:  tickets.StatusNew,
-		Amount:  input.Amount,
-		Comment: input.Comment,
+		UserID:   input.UserID,
+		TopicID:  input.TopicID,
+		Status:   tickets.StatusNew,
+		Priority: priority,
+		Amount:   input.Amount,
+		Comment:  input.Comment,
 	}
 
 	// Валидация доменной модели
@@ -129,6 +142,93 @@ func (s *service) CreateTicket(ctx context.Context, input CreateTicketInput) (ti
 
 	s.logger.Info().Int64("ticket_id", created.ID).Msg("ticket created")
 	return created, nil
+}
+
+// UpdatePriority changes a ticket priority and records the change in history.
+func (s *service) UpdatePriority(
+	ctx context.Context,
+	ticketID int64,
+	priority tickets.Priority,
+) (tickets.Ticket, error) {
+	if !priority.IsValid() {
+		return tickets.Ticket{}, ErrInvalidPriority
+	}
+
+	return s.changePriority(ctx, ticketID, priority, tickets.ActionPriorityChanged, false)
+}
+
+// EscalateTicket raises a ticket priority by one level.
+func (s *service) EscalateTicket(ctx context.Context, ticketID int64) (tickets.Ticket, error) {
+	return s.changePriority(ctx, ticketID, 0, tickets.ActionPriorityEscalated, true)
+}
+
+func (s *service) changePriority(
+	ctx context.Context,
+	ticketID int64,
+	priority tickets.Priority,
+	action tickets.HistoryAction,
+	escalate bool,
+) (tickets.Ticket, error) {
+	tx, err := s.db.BeginTx(ctx)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to begin priority transaction")
+		return tickets.Ticket{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	txCtx := ContextWithTx(ctx, tx)
+	existing, err := s.repo.GetByID(txCtx, ticketID)
+	if err != nil {
+		return tickets.Ticket{}, fmt.Errorf("failed to get ticket: %w", err)
+	}
+
+	if escalate {
+		if existing.Status == tickets.StatusClosed || existing.Status == tickets.StatusCancelled {
+			return tickets.Ticket{}, ErrConflict
+		}
+		priority = existing.Priority.Escalate()
+	}
+
+	if !priority.IsValid() {
+		return tickets.Ticket{}, ErrInvalidPriority
+	}
+	if priority == existing.Priority {
+		return existing, nil
+	}
+
+	oldPriority := existing.Priority
+	existing.Priority = priority
+	if err := existing.Validate(); err != nil {
+		return tickets.Ticket{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+	}
+
+	updated, err := s.repo.Update(txCtx, existing)
+	if err != nil {
+		return tickets.Ticket{}, fmt.Errorf("failed to update ticket priority: %w", err)
+	}
+
+	history := tickets.History{
+		TicketID: updated.ID,
+		UserID:   updated.UserID,
+		Action:   action,
+		OldValue: oldPriority.String(),
+		NewValue: priority.String(),
+	}
+	if err = s.repo.AddHistory(txCtx, history); err != nil {
+		return tickets.Ticket{}, fmt.Errorf("failed to add priority history: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return tickets.Ticket{}, fmt.Errorf("failed to commit priority transaction: %w", err)
+	}
+
+	s.logger.Info().
+		Int64("ticket_id", updated.ID).
+		Str("old_priority", oldPriority.String()).
+		Str("new_priority", priority.String()).
+		Msg("ticket priority changed")
+
+	return updated, nil
 }
 
 // GetTicket возвращает тикет по ID

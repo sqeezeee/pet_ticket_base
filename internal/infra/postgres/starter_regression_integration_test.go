@@ -147,6 +147,64 @@ func TestServiceConcurrentUpdatesPreserveBothFields_Integration(t *testing.T) {
 	}
 }
 
+func TestServiceConcurrentEscalationsReachCritical_Integration(t *testing.T) {
+	db := setupTestDB(t).db
+	repo := NewTicketsRepository(db)
+	svc := app.NewService(repo, db, zerolog.Nop())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	created, err := svc.CreateTicket(ctx, app.CreateTicketInput{UserID: 10, TopicID: 1, Comment: "concurrent escalation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := svc.EscalateTicket(ctx, created.ID)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := repo.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Priority != domain.PriorityCritical {
+		t.Fatalf("priority = %s, want critical", got.Priority)
+	}
+
+	history, err := repo.GetHistory(ctx, created.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transitions := map[string]bool{}
+	for _, entry := range history {
+		if entry.Action == domain.ActionPriorityEscalated {
+			transitions[entry.OldValue+"->"+entry.NewValue] = true
+		}
+	}
+	for _, transition := range []string{"medium->high", "high->critical"} {
+		if !transitions[transition] {
+			t.Fatalf("missing history transition %s: %+v", transition, history)
+		}
+	}
+}
+
 func TestMigrationParityAndRollback_Integration(t *testing.T) {
 	db := setupTestDB(t).db
 	if err := migration.Up(db.conn); err != nil {
@@ -161,6 +219,9 @@ func TestMigrationParityAndRollback_Integration(t *testing.T) {
 	var count int
 	if err := db.conn.QueryRow("SELECT count(*) FROM ticket_statuses").Scan(&count); err != nil || count != 5 {
 		t.Fatalf("seed after replay: %d %v", count, err)
+	}
+	if err := db.conn.QueryRow("SELECT count(*) FROM ticket_priorities").Scan(&count); err != nil || count != 4 {
+		t.Fatalf("priority seed after replay: %d %v", count, err)
 	}
 }
 

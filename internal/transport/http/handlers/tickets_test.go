@@ -22,6 +22,8 @@ type mockTicketsService struct {
 	createTicketFunc     func(ctx context.Context, input tickets.CreateTicketInput) (domain.Ticket, error)
 	getTicketFunc        func(ctx context.Context, id int64) (domain.Ticket, error)
 	updateTicketFunc     func(ctx context.Context, input tickets.UpdateTicketInput) (domain.Ticket, error)
+	updatePriorityFunc   func(ctx context.Context, ticketID int64, priority domain.Priority) (domain.Ticket, error)
+	escalateTicketFunc   func(ctx context.Context, ticketID int64) (domain.Ticket, error)
 	deleteTicketFunc     func(ctx context.Context, id int64) error
 	listTicketsFunc      func(ctx context.Context, input tickets.ListTicketsInput) ([]domain.Ticket, error)
 	getTicketHistoryFunc func(ctx context.Context, ticketID int64, limit, offset int) ([]domain.History, error)
@@ -46,6 +48,24 @@ func (m *mockTicketsService) GetTicket(ctx context.Context, id int64) (domain.Ti
 func (m *mockTicketsService) UpdateTicket(ctx context.Context, input tickets.UpdateTicketInput) (domain.Ticket, error) {
 	if m.updateTicketFunc != nil {
 		return m.updateTicketFunc(ctx, input)
+	}
+	return domain.Ticket{}, errors.New("not implemented")
+}
+
+func (m *mockTicketsService) UpdatePriority(
+	ctx context.Context,
+	ticketID int64,
+	priority domain.Priority,
+) (domain.Ticket, error) {
+	if m.updatePriorityFunc != nil {
+		return m.updatePriorityFunc(ctx, ticketID, priority)
+	}
+	return domain.Ticket{}, errors.New("not implemented")
+}
+
+func (m *mockTicketsService) EscalateTicket(ctx context.Context, ticketID int64) (domain.Ticket, error) {
+	if m.escalateTicketFunc != nil {
+		return m.escalateTicketFunc(ctx, ticketID)
 	}
 	return domain.Ticket{}, errors.New("not implemented")
 }
@@ -89,11 +109,12 @@ func (m *mockTicketsService) GetAllTopics(ctx context.Context) ([]domain.Topic, 
 func TestGetTicket_Success(t *testing.T) {
 	// Arrange
 	expectedTicket := domain.Ticket{
-		ID:      1,
-		UserID:  100,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Test ticket",
+		ID:       1,
+		UserID:   100,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Test ticket",
 	}
 
 	mockSvc := &mockTicketsService{
@@ -175,11 +196,12 @@ func TestGetTicket_NotFound(t *testing.T) {
 func TestCreateTicket_Success_WithValidation(t *testing.T) {
 	// Arrange
 	createdTicket := domain.Ticket{
-		ID:      42,
-		UserID:  100,
-		TopicID: 1,
-		Status:  domain.StatusNew,
-		Comment: "Test ticket from handler",
+		ID:       42,
+		UserID:   100,
+		TopicID:  1,
+		Status:   domain.StatusNew,
+		Priority: domain.PriorityMedium,
+		Comment:  "Test ticket from handler",
 	}
 
 	mockSvc := &mockTicketsService{
@@ -229,13 +251,51 @@ func TestCreateTicket_Success_WithValidation(t *testing.T) {
 	}
 }
 
+func TestCreateTicket_WithExplicitPriority(t *testing.T) {
+	priorityID := int(domain.PriorityHigh)
+	app := fiber.New()
+	handler := NewTicketsHandler(&mockTicketsService{
+		createTicketFunc: func(_ context.Context, input tickets.CreateTicketInput) (domain.Ticket, error) {
+			if input.Priority == nil || *input.Priority != domain.PriorityHigh {
+				t.Fatalf("priority input = %v, want high", input.Priority)
+			}
+			return domain.Ticket{
+				ID: 1, UserID: input.UserID, TopicID: input.TopicID,
+				Status: domain.StatusNew, Priority: *input.Priority, Comment: input.Comment,
+			}, nil
+		},
+	}, testLogger())
+	app.Post("/tickets", func(c *fiber.Ctx) error {
+		c.Locals("validatedBody", CreateTicketRequest{
+			UserID: 1, TopicID: 1, PriorityID: &priorityID, Comment: "High priority ticket",
+		})
+		return handler.createTicket(c)
+	})
+
+	resp, err := app.Test(httptest.NewRequest("POST", "/tickets", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusCreated {
+		t.Fatalf("got %d, want 201", resp.StatusCode)
+	}
+	var body dto.TicketResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.PriorityID != priorityID {
+		t.Fatalf("priorityId = %d, want %d", body.PriorityID, priorityID)
+	}
+}
+
 // TestListTickets_WithFilters — получение списка с фильтрами
 func TestListTickets_WithFilters(t *testing.T) {
 	// Arrange
 	userID := int64(100)
 	expectedTickets := []domain.Ticket{
-		{ID: 1, UserID: 100, TopicID: 1, Status: domain.StatusNew, Comment: "Ticket 1"},
-		{ID: 2, UserID: 100, TopicID: 2, Status: domain.StatusInProgress, Comment: "Ticket 2"},
+		{ID: 1, UserID: 100, TopicID: 1, Status: domain.StatusNew, Priority: domain.PriorityMedium, Comment: "Ticket 1"},
+		{ID: 2, UserID: 100, TopicID: 2, Status: domain.StatusInProgress, Priority: domain.PriorityHigh, Comment: "Ticket 2"},
 	}
 
 	var capturedFilter tickets.ListTicketsInput
@@ -290,17 +350,34 @@ func testLogger() zerolog.Logger {
 	return zerolog.New(io.Discard)
 }
 
-func TestStarterEscalationDoesNotPretendSuccess(t *testing.T) {
+func TestEscalateTicket_Success(t *testing.T) {
 	app := fiber.New()
-	h := NewTicketsHandler(&mockTicketsService{}, zerolog.Nop())
+	h := NewTicketsHandler(&mockTicketsService{
+		escalateTicketFunc: func(_ context.Context, ticketID int64) (domain.Ticket, error) {
+			if ticketID != 1 {
+				t.Fatalf("ticketID = %d, want 1", ticketID)
+			}
+			return domain.Ticket{
+				ID: 1, UserID: 100, TopicID: 1, Status: domain.StatusNew,
+				Priority: domain.PriorityHigh, Comment: "Escalated ticket",
+			}, nil
+		},
+	}, zerolog.Nop())
 	h.RegisterRoutes(app.Group("/api/v1"))
 	resp, err := app.Test(httptest.NewRequest("POST", "/api/v1/tickets/1/escalate", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 501 {
-		t.Fatalf("got %d, want 501 until Task 1 is implemented", resp.StatusCode)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	var body dto.TicketResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.PriorityID != int(domain.PriorityHigh) || body.PriorityName != "high" {
+		t.Fatalf("unexpected priority response: %+v", body)
 	}
 }
 
@@ -316,6 +393,51 @@ func TestListRejectsInvalidStatus(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != 400 {
 			t.Fatalf("statusId=%q: got %d", value, resp.StatusCode)
+		}
+	}
+}
+
+func TestListTickets_WithPriorityFilterAndSort(t *testing.T) {
+	var captured tickets.ListTicketsInput
+	app := fiber.New()
+	h := NewTicketsHandler(&mockTicketsService{
+		listTicketsFunc: func(_ context.Context, input tickets.ListTicketsInput) ([]domain.Ticket, error) {
+			captured = input
+			return []domain.Ticket{}, nil
+		},
+	}, zerolog.Nop())
+	h.RegisterRoutes(app.Group("/api/v1"))
+
+	resp, err := app.Test(httptest.NewRequest(
+		"GET", "/api/v1/tickets?priorityId=3&sortBy=priority_id&sortDesc=false", nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("got %d, want 200", resp.StatusCode)
+	}
+	if captured.Priority == nil || *captured.Priority != domain.PriorityHigh {
+		t.Fatalf("priority filter = %v, want high", captured.Priority)
+	}
+	if captured.SortBy != "priority_id" || captured.SortDesc {
+		t.Fatalf("unexpected sort: %q desc=%v", captured.SortBy, captured.SortDesc)
+	}
+}
+
+func TestListRejectsInvalidPriority(t *testing.T) {
+	app := fiber.New()
+	h := NewTicketsHandler(&mockTicketsService{}, zerolog.Nop())
+	h.RegisterRoutes(app.Group("/api/v1"))
+	for _, value := range []string{"", "bad", "0", "-1", "5"} {
+		resp, err := app.Test(httptest.NewRequest("GET", "/api/v1/tickets?priorityId="+value, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != fiber.StatusBadRequest {
+			t.Fatalf("priorityId=%q: got %d, want 400", value, resp.StatusCode)
 		}
 	}
 }

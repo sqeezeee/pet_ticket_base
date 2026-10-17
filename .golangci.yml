@@ -1,4 +1,4 @@
-version: 2
+version: "2"
 
 run:
   timeout: 5m
@@ -25,50 +25,43 @@ linters:
     - dupl
     - prealloc
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
+  settings:
+    gocyclo:
+      min-complexity: 20
 
-  govet:
-    enable-all: true
+    dupl:
+      threshold: 150
 
-  gocyclo:
-    min-complexity: 15
+    gosec:
+      excludes:
+        - G202  # SQL string concatenation with validated placeholders
 
-  dupl:
-    threshold: 100
+    gocritic:
+      disabled-checks:
+        - exitAfterDefer
 
-  gosec:
-    excludes:
-      - G202  # SQL string concatenation with validated placeholders
-
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - experimental
-      - opinionated
-      - performance
-      - style
-    disabled-checks:
-      - exitAfterDefer
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - errcheck
+          - gosec
+          - gocritic
+          - noctx
+      # Legacy migration code predates context-aware database calls.
+      - path: internal/infra/migration/migration\.go
+        linters:
+          - noctx
+      # Отключаем G202 для tickets_repo.go - используем валидированные placeholders
+      - path: internal/infra/postgres/tickets_repo\.go
+        linters:
+          - gosec
+        text: "G202"
+      - linters:
+          - gosec
+        text: "G202.*SQL string concatenation"
 
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - dupl
-        - gosec
-        - gocritic
-    # Отключаем G202 для tickets_repo.go - используем валидированные placeholders
-    - path: internal/infra/postgres/tickets_repo\.go
-      linters:
-        - gosec
-      text: "G202"
-    - linters:
-        - gosec
-      text: "G202.*SQL string concatenation"

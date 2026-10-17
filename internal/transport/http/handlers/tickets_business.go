@@ -78,8 +78,16 @@ func (h *TicketsHandler) assignTicket(c *fiber.Ctx) error {
 	})
 }
 
-// escalateTicket is intentionally unfinished: Task 1 implements priority escalation.
-// A placeholder must not report success or overwrite the ticket comment.
 func (h *TicketsHandler) escalateTicket(c *fiber.Ctx) error {
-	return fiber.NewError(fiber.StatusNotImplemented, "priority escalation is Task 1; not implemented in the starter")
+	ticketID, err := strconv.ParseInt(c.Params("id"), 10, 64)
+	if err != nil || ticketID <= 0 {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid ticket id")
+	}
+
+	updated, err := h.service.EscalateTicket(c.UserContext(), ticketID)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(dto.ToTicketResponse(updated))
 }

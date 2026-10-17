@@ -39,8 +39,8 @@ func (r *TicketsRepository) getExecutor(ctx context.Context) Executor {
 // Create создаёт новый тикет
 func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (domain.Ticket, error) {
 	query := `
-		INSERT INTO tickets (user_id, topic_id, status_id, amount, comment)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO tickets (user_id, topic_id, status_id, priority_id, amount, comment)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
 	`
 
@@ -49,6 +49,7 @@ func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (d
 		ticket.UserID,
 		ticket.TopicID,
 		int(ticket.Status),
+		int(ticket.Priority),
 		ticket.Amount,
 		ticket.Comment,
 	).Scan(&ticket.ID, &ticket.CreatedAt, &ticket.UpdatedAt)
@@ -63,7 +64,7 @@ func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (d
 // GetByID возвращает тикет по ID
 func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticket, error) {
 	query := `
-		SELECT id, user_id, topic_id, status_id, amount, comment, created_at, updated_at
+		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at
 		FROM tickets
 		WHERE id = $1
 	`
@@ -75,12 +76,14 @@ func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticke
 
 	var ticket domain.Ticket
 	var statusID int
+	var priorityID int
 
 	err := r.getExecutor(ctx).QueryRowContext(ctx, query, id).Scan(
 		&ticket.ID,
 		&ticket.UserID,
 		&ticket.TopicID,
 		&statusID,
+		&priorityID,
 		&ticket.Amount,
 		&ticket.Comment,
 		&ticket.CreatedAt,
@@ -95,6 +98,7 @@ func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticke
 	}
 
 	ticket.Status = domain.Status(statusID)
+	ticket.Priority = domain.Priority(priorityID)
 	return ticket, nil
 }
 
@@ -102,8 +106,8 @@ func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticke
 func (r *TicketsRepository) Update(ctx context.Context, ticket domain.Ticket) (domain.Ticket, error) {
 	query := `
 		UPDATE tickets
-		SET user_id = $1, topic_id = $2, status_id = $3, amount = $4, comment = $5
-		WHERE id = $6
+		SET user_id = $1, topic_id = $2, status_id = $3, priority_id = $4, amount = $5, comment = $6
+		WHERE id = $7
 		RETURNING updated_at
 	`
 
@@ -112,6 +116,7 @@ func (r *TicketsRepository) Update(ctx context.Context, ticket domain.Ticket) (d
 		ticket.UserID,
 		ticket.TopicID,
 		int(ticket.Status),
+		int(ticket.Priority),
 		ticket.Amount,
 		ticket.Comment,
 		ticket.ID,
@@ -151,7 +156,7 @@ func (r *TicketsRepository) Delete(ctx context.Context, id int64) error {
 // List возвращает список тикетов с фильтрацией
 func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter) ([]domain.Ticket, error) {
 	query := `
-		SELECT id, user_id, topic_id, status_id, amount, comment, created_at, updated_at
+		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at
 		FROM tickets
 		WHERE 1=1
 	`
@@ -180,15 +185,25 @@ func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter)
 		argPos++
 	}
 
+	if filter.Priority != nil {
+		if !filter.Priority.IsValid() {
+			return nil, tickets.ErrInvalidPriority
+		}
+		query += fmt.Sprintf(" AND priority_id = $%d", argPos)
+		args = append(args, int(*filter.Priority))
+		argPos++
+	}
+
 	// Сортировка (whitelist для защиты от SQL injection)
 	allowedSortFields := map[string]bool{
-		"id":         true,
-		"user_id":    true,
-		"topic_id":   true,
-		"status_id":  true,
-		"amount":     true,
-		"created_at": true,
-		"updated_at": true,
+		"id":          true,
+		"user_id":     true,
+		"topic_id":    true,
+		"status_id":   true,
+		"priority_id": true,
+		"amount":      true,
+		"created_at":  true,
+		"updated_at":  true,
 	}
 
 	sortBy := "created_at"
@@ -201,6 +216,9 @@ func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter)
 		sortOrder = "ASC"
 	}
 	query += fmt.Sprintf(" ORDER BY %s %s", sortBy, sortOrder)
+	if sortBy == "priority_id" {
+		query += fmt.Sprintf(", id %s", sortOrder)
+	}
 
 	// Пагинация
 	if filter.Limit > 0 {
@@ -229,12 +247,14 @@ func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter)
 	for rows.Next() {
 		var ticket domain.Ticket
 		var statusID int
+		var priorityID int
 
 		err := rows.Scan(
 			&ticket.ID,
 			&ticket.UserID,
 			&ticket.TopicID,
 			&statusID,
+			&priorityID,
 			&ticket.Amount,
 			&ticket.Comment,
 			&ticket.CreatedAt,
@@ -245,6 +265,7 @@ func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter)
 		}
 
 		ticket.Status = domain.Status(statusID)
+		ticket.Priority = domain.Priority(priorityID)
 		ticketList = append(ticketList, ticket)
 	}
 
