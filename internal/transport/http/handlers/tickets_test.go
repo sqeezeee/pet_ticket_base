@@ -29,6 +29,8 @@ type mockTicketsService struct {
 	getTicketHistoryFunc func(ctx context.Context, ticketID int64, limit, offset int) ([]domain.History, error)
 	getAllStatusesFunc   func(ctx context.Context) ([]tickets.StatusInfo, error)
 	getAllTopicsFunc     func(ctx context.Context) ([]domain.Topic, error)
+	addCommentFunc       func(ctx context.Context, input tickets.AddCommentInput) (domain.Ticket, error)
+	getSLAViolationsFunc func(ctx context.Context) ([]domain.Ticket, error)
 }
 
 func (m *mockTicketsService) CreateTicket(ctx context.Context, input tickets.CreateTicketInput) (domain.Ticket, error) {
@@ -101,6 +103,20 @@ func (m *mockTicketsService) GetAllStatuses(ctx context.Context) ([]tickets.Stat
 func (m *mockTicketsService) GetAllTopics(ctx context.Context) ([]domain.Topic, error) {
 	if m.getAllTopicsFunc != nil {
 		return m.getAllTopicsFunc(ctx)
+	}
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockTicketsService) AddComment(ctx context.Context, input tickets.AddCommentInput) (domain.Ticket, error) {
+	if m.addCommentFunc != nil {
+		return m.addCommentFunc(ctx, input)
+	}
+	return domain.Ticket{}, errors.New("not implemented")
+}
+
+func (m *mockTicketsService) GetSLAViolations(ctx context.Context) ([]domain.Ticket, error) {
+	if m.getSLAViolationsFunc != nil {
+		return m.getSLAViolationsFunc(ctx)
 	}
 	return nil, errors.New("not implemented")
 }
@@ -256,12 +272,12 @@ func TestCreateTicket_WithExplicitPriority(t *testing.T) {
 	app := fiber.New()
 	handler := NewTicketsHandler(&mockTicketsService{
 		createTicketFunc: func(_ context.Context, input tickets.CreateTicketInput) (domain.Ticket, error) {
-			if input.Priority == nil || *input.Priority != domain.PriorityHigh {
+			if input.Priority != domain.PriorityHigh {
 				t.Fatalf("priority input = %v, want high", input.Priority)
 			}
 			return domain.Ticket{
 				ID: 1, UserID: input.UserID, TopicID: input.TopicID,
-				Status: domain.StatusNew, Priority: *input.Priority, Comment: input.Comment,
+				Status: domain.StatusNew, Priority: input.Priority, Comment: input.Comment,
 			}, nil
 		},
 	}, testLogger())

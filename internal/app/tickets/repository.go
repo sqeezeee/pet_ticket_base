@@ -2,6 +2,7 @@ package tickets
 
 import (
 	"context"
+	"time"
 
 	"pet-ticket/internal/domain/tickets"
 )
@@ -37,6 +38,12 @@ type Repository interface {
 
 	// GetAllTopics возвращает все темы тикетов из справочника
 	GetAllTopics(ctx context.Context) ([]tickets.Topic, error)
+
+	// GetSLARule returns the rule for a topic and priority combination.
+	GetSLARule(ctx context.Context, topicID int64, priority tickets.Priority) (tickets.SLARule, error)
+
+	// FindSLAViolations returns tickets with a missed response or resolution target.
+	FindSLAViolations(ctx context.Context, now time.Time) ([]tickets.Ticket, error)
 }
 
 // StatusInfo представляет информацию о статусе из БД

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	domain "pet-ticket/internal/domain/tickets"
 
@@ -24,6 +25,8 @@ type mockRepository struct {
 	getHistoryFunc  func(ctx context.Context, ticketID int64, limit, offset int) ([]domain.History, error)
 	getStatusesFunc func(ctx context.Context) ([]StatusInfo, error)
 	getTopicsFunc   func(ctx context.Context) ([]domain.Topic, error)
+	getSLARuleFunc  func(ctx context.Context, topicID int64, priority domain.Priority) (domain.SLARule, error)
+	findSLAFunc     func(ctx context.Context, now time.Time) ([]domain.Ticket, error)
 }
 
 func (m *mockRepository) Create(ctx context.Context, ticket domain.Ticket) (domain.Ticket, error) {
@@ -87,6 +90,20 @@ func (m *mockRepository) GetAllTopics(ctx context.Context) ([]domain.Topic, erro
 		return m.getTopicsFunc(ctx)
 	}
 	return nil, errors.New("not implemented")
+}
+
+func (m *mockRepository) GetSLARule(ctx context.Context, topicID int64, priority domain.Priority) (domain.SLARule, error) {
+	if m.getSLARuleFunc != nil {
+		return m.getSLARuleFunc(ctx, topicID, priority)
+	}
+	return domain.SLARule{TopicID: topicID, Priority: priority, ResponseTime: time.Hour, ResolutionTime: 4 * time.Hour}, nil
+}
+
+func (m *mockRepository) FindSLAViolations(ctx context.Context, now time.Time) ([]domain.Ticket, error) {
+	if m.findSLAFunc != nil {
+		return m.findSLAFunc(ctx, now)
+	}
+	return nil, nil
 }
 
 // mockDB — мок для работы с транзакциями
@@ -302,13 +319,73 @@ func TestCreateTicket_UsesExplicitPriority(t *testing.T) {
 	}
 
 	got, err := NewService(repo, &mockDB{}, testLogger()).CreateTicket(context.Background(), CreateTicketInput{
-		UserID: 1, TopicID: 1, Priority: &priority, Comment: "High priority ticket",
+		UserID: 1, TopicID: 1, Priority: priority, Comment: "High priority ticket",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if captured.Priority != domain.PriorityHigh || got.Priority != domain.PriorityHigh {
 		t.Fatalf("priority = %s, want high", got.Priority)
+	}
+}
+
+func TestAddComment_RecordsFirstSupportResponse(t *testing.T) {
+	existing := domain.Ticket{
+		ID: 1, UserID: 100, TopicID: 1, Status: domain.StatusInProgress,
+		Priority: domain.PriorityMedium, Comment: "customer question",
+	}
+	var updated domain.Ticket
+	var actions []domain.HistoryAction
+	repo := &mockRepository{
+		getByIDFunc: func(context.Context, int64) (domain.Ticket, error) { return existing, nil },
+		updateFunc: func(_ context.Context, ticket domain.Ticket) (domain.Ticket, error) {
+			updated = ticket
+			return ticket, nil
+		},
+		addHistoryFunc: func(_ context.Context, history domain.History) error {
+			actions = append(actions, history.Action)
+			return nil
+		},
+	}
+
+	got, err := NewService(repo, &mockDB{}, testLogger()).AddComment(context.Background(), AddCommentInput{
+		TicketID: 1, UserID: 200, Comment: "support response", IsSupport: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FirstResponseAt == nil || got.FirstResponseAt == nil {
+		t.Fatal("first_response_at was not set")
+	}
+	if len(actions) != 2 || actions[0] != domain.ActionCommentAdded || actions[1] != domain.ActionFirstResponse {
+		t.Fatalf("history actions = %v", actions)
+	}
+}
+
+func TestUpdateTicket_RecordsResolvedAt(t *testing.T) {
+	existing := domain.Ticket{
+		ID: 1, UserID: 100, TopicID: 1, Status: domain.StatusInProgress,
+		Priority: domain.PriorityMedium, Comment: "working",
+	}
+	var updated domain.Ticket
+	repo := &mockRepository{
+		getByIDFunc: func(context.Context, int64) (domain.Ticket, error) { return existing, nil },
+		updateFunc: func(_ context.Context, ticket domain.Ticket) (domain.Ticket, error) {
+			updated = ticket
+			return ticket, nil
+		},
+		addHistoryFunc: func(context.Context, domain.History) error { return nil },
+	}
+	status := domain.StatusResolved
+
+	got, err := NewService(repo, &mockDB{}, testLogger()).UpdateTicket(context.Background(), UpdateTicketInput{
+		ID: 1, Status: &status,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ResolvedAt == nil || got.ResolvedAt == nil {
+		t.Fatal("resolved_at was not set")
 	}
 }
 

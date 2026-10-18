@@ -24,18 +24,35 @@ type TicketUpdateRequest struct {
 
 // TicketResponse представляет HTTP ответ с данными тикета
 type TicketResponse struct {
-	ID           int64     `json:"id"`
-	UserID       int64     `json:"userId"`
-	TopicID      int64     `json:"topicId"`
-	TopicName    string    `json:"topicName,omitempty"`
-	StatusID     int       `json:"statusId"`
-	StatusName   string    `json:"statusName,omitempty"`
-	PriorityID   int       `json:"priorityId"`
-	PriorityName string    `json:"priorityName"`
-	Amount       *float64  `json:"amount,omitempty"`
-	Comment      string    `json:"comment"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID                 int64      `json:"id"`
+	UserID             int64      `json:"userId"`
+	TopicID            int64      `json:"topicId"`
+	TopicName          string     `json:"topicName,omitempty"`
+	StatusID           int        `json:"statusId"`
+	StatusName         string     `json:"statusName,omitempty"`
+	PriorityID         int        `json:"priorityId"`
+	PriorityName       string     `json:"priorityName"`
+	Amount             *float64   `json:"amount,omitempty"`
+	Comment            string     `json:"comment"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	ResponseDeadline   time.Time  `json:"responseDeadline"`
+	ResolutionDeadline time.Time  `json:"resolutionDeadline"`
+	FirstResponseAt    *time.Time `json:"firstResponseAt,omitempty"`
+	ResolvedAt         *time.Time `json:"resolvedAt,omitempty"`
+}
+
+// SLAMetricsResponse is the API representation of calculated SLA state.
+type SLAMetricsResponse struct {
+	ResponseStatus   string `json:"responseStatus"`
+	ResolutionStatus string `json:"resolutionStatus"`
+	OverallStatus    string `json:"overallStatus"`
+}
+
+// TicketWithSLAResponse combines persisted ticket data and dynamic SLA state.
+type TicketWithSLAResponse struct {
+	TicketResponse
+	SLA SLAMetricsResponse `json:"sla"`
 }
 
 // TicketHistoryResponse представляет HTTP ответ с записью истории тикета
@@ -84,18 +101,45 @@ type ErrorDetail struct {
 // ToTicketResponse конвертирует доменную модель в DTO
 func ToTicketResponse(ticket domain.Ticket) TicketResponse {
 	return TicketResponse{
-		ID:           ticket.ID,
-		UserID:       ticket.UserID,
-		TopicID:      ticket.TopicID,
-		StatusID:     int(ticket.Status),
-		StatusName:   ticket.Status.String(),
-		PriorityID:   int(ticket.Priority),
-		PriorityName: ticket.Priority.String(),
-		Amount:       ticket.Amount,
-		Comment:      ticket.Comment,
-		CreatedAt:    ticket.CreatedAt,
-		UpdatedAt:    ticket.UpdatedAt,
+		ID:                 ticket.ID,
+		UserID:             ticket.UserID,
+		TopicID:            ticket.TopicID,
+		StatusID:           int(ticket.Status),
+		StatusName:         ticket.Status.String(),
+		PriorityID:         int(ticket.Priority),
+		PriorityName:       ticket.Priority.String(),
+		Amount:             ticket.Amount,
+		Comment:            ticket.Comment,
+		CreatedAt:          ticket.CreatedAt,
+		UpdatedAt:          ticket.UpdatedAt,
+		ResponseDeadline:   ticket.ResponseDeadline,
+		ResolutionDeadline: ticket.ResolutionDeadline,
+		FirstResponseAt:    ticket.FirstResponseAt,
+		ResolvedAt:         ticket.ResolvedAt,
 	}
+}
+
+// ToTicketWithSLAResponse converts a ticket and calculates its status at now.
+func ToTicketWithSLAResponse(ticket domain.Ticket, now time.Time) TicketWithSLAResponse {
+	metrics := domain.CalculateSLAStatus(ticket, now)
+	return TicketWithSLAResponse{
+		TicketResponse: ToTicketResponse(ticket),
+		SLA: SLAMetricsResponse{
+			ResponseStatus:   string(metrics.ResponseStatus),
+			ResolutionStatus: string(metrics.ResolutionStatus),
+			OverallStatus:    string(metrics.OverallStatus),
+		},
+	}
+}
+
+// ToTicketWithSLAResponseList converts SLA ticket results using one consistent timestamp.
+func ToTicketWithSLAResponseList(ticketList []domain.Ticket) []TicketWithSLAResponse {
+	now := time.Now()
+	result := make([]TicketWithSLAResponse, len(ticketList))
+	for i, ticket := range ticketList {
+		result[i] = ToTicketWithSLAResponse(ticket, now)
+	}
+	return result
 }
 
 // ToTicketHistoryResponse конвертирует доменную модель истории в DTO

@@ -36,8 +36,7 @@ func (h *TicketsHandler) createTicket(c *fiber.Ctx) error {
 		Comment: req.Comment,
 	}
 	if req.PriorityID != nil {
-		priority := domain.Priority(*req.PriorityID)
-		input.Priority = &priority
+		input.Priority = domain.Priority(*req.PriorityID)
 	}
 
 	ticket, err := h.service.CreateTicket(c.UserContext(), input)

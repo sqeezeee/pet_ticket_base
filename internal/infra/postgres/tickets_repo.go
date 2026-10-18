@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"pet-ticket/internal/app/tickets"
 	domain "pet-ticket/internal/domain/tickets"
@@ -39,8 +40,11 @@ func (r *TicketsRepository) getExecutor(ctx context.Context) Executor {
 // Create создаёт новый тикет
 func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (domain.Ticket, error) {
 	query := `
-		INSERT INTO tickets (user_id, topic_id, status_id, priority_id, amount, comment)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO tickets (
+			user_id, topic_id, status_id, priority_id, amount, comment,
+			created_at, response_deadline, resolution_deadline
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_TIMESTAMP), $8, $9)
 		RETURNING id, created_at, updated_at
 	`
 
@@ -52,6 +56,9 @@ func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (d
 		int(ticket.Priority),
 		ticket.Amount,
 		ticket.Comment,
+		nullableTime(ticket.CreatedAt),
+		nullableTime(ticket.ResponseDeadline),
+		nullableTime(ticket.ResolutionDeadline),
 	).Scan(&ticket.ID, &ticket.CreatedAt, &ticket.UpdatedAt)
 
 	if err != nil {
@@ -61,10 +68,18 @@ func (r *TicketsRepository) Create(ctx context.Context, ticket domain.Ticket) (d
 	return ticket, nil
 }
 
+func nullableTime(value time.Time) interface{} {
+	if value.IsZero() {
+		return nil
+	}
+	return value
+}
+
 // GetByID возвращает тикет по ID
 func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticket, error) {
 	query := `
-		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at
+		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at,
+		       response_deadline, resolution_deadline, first_response_at, resolved_at
 		FROM tickets
 		WHERE id = $1
 	`
@@ -88,6 +103,10 @@ func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticke
 		&ticket.Comment,
 		&ticket.CreatedAt,
 		&ticket.UpdatedAt,
+		&ticket.ResponseDeadline,
+		&ticket.ResolutionDeadline,
+		&ticket.FirstResponseAt,
+		&ticket.ResolvedAt,
 	)
 
 	if err != nil {
@@ -106,8 +125,10 @@ func (r *TicketsRepository) GetByID(ctx context.Context, id int64) (domain.Ticke
 func (r *TicketsRepository) Update(ctx context.Context, ticket domain.Ticket) (domain.Ticket, error) {
 	query := `
 		UPDATE tickets
-		SET user_id = $1, topic_id = $2, status_id = $3, priority_id = $4, amount = $5, comment = $6
-		WHERE id = $7
+		SET user_id = $1, topic_id = $2, status_id = $3, priority_id = $4, amount = $5, comment = $6,
+		    response_deadline = $7, resolution_deadline = $8,
+		    first_response_at = $9, resolved_at = $10
+		WHERE id = $11
 		RETURNING updated_at
 	`
 
@@ -119,6 +140,10 @@ func (r *TicketsRepository) Update(ctx context.Context, ticket domain.Ticket) (d
 		int(ticket.Priority),
 		ticket.Amount,
 		ticket.Comment,
+		ticket.ResponseDeadline,
+		ticket.ResolutionDeadline,
+		ticket.FirstResponseAt,
+		ticket.ResolvedAt,
 		ticket.ID,
 	).Scan(&ticket.UpdatedAt)
 
@@ -156,7 +181,8 @@ func (r *TicketsRepository) Delete(ctx context.Context, id int64) error {
 // List возвращает список тикетов с фильтрацией
 func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter) ([]domain.Ticket, error) {
 	query := `
-		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at
+		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at,
+		       response_deadline, resolution_deadline, first_response_at, resolved_at
 		FROM tickets
 		WHERE 1=1
 	`
@@ -259,6 +285,10 @@ func (r *TicketsRepository) List(ctx context.Context, filter tickets.ListFilter)
 			&ticket.Comment,
 			&ticket.CreatedAt,
 			&ticket.UpdatedAt,
+			&ticket.ResponseDeadline,
+			&ticket.ResolutionDeadline,
+			&ticket.FirstResponseAt,
+			&ticket.ResolvedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan ticket: %w", err)
@@ -416,4 +446,73 @@ func (r *TicketsRepository) GetAllTopics(ctx context.Context) ([]domain.Topic, e
 	}
 
 	return topics, nil
+}
+
+// GetSLARule returns the SLA rule for a topic and priority.
+func (r *TicketsRepository) GetSLARule(
+	ctx context.Context,
+	topicID int64,
+	priority domain.Priority,
+) (domain.SLARule, error) {
+	const query = `
+		SELECT id, topic_id, priority_id, response_time_minutes, resolution_time_minutes
+		FROM sla_rules
+		WHERE topic_id = $1 AND priority_id = $2
+	`
+	var rule domain.SLARule
+	var priorityID int
+	var responseMinutes, resolutionMinutes int64
+	err := r.getExecutor(ctx).QueryRowContext(ctx, query, topicID, int(priority)).Scan(
+		&rule.ID, &rule.TopicID, &priorityID, &responseMinutes, &resolutionMinutes,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SLARule{}, tickets.ErrNotFound
+	}
+	if err != nil {
+		return domain.SLARule{}, fmt.Errorf("failed to get SLA rule: %w", err)
+	}
+	rule.Priority = domain.Priority(priorityID)
+	rule.ResponseTime = time.Duration(responseMinutes) * time.Minute
+	rule.ResolutionTime = time.Duration(resolutionMinutes) * time.Minute
+	return rule, nil
+}
+
+// FindSLAViolations returns tickets whose response or resolution target was missed.
+func (r *TicketsRepository) FindSLAViolations(ctx context.Context, now time.Time) ([]domain.Ticket, error) {
+	const query = `
+		SELECT id, user_id, topic_id, status_id, priority_id, amount, comment, created_at, updated_at,
+		       response_deadline, resolution_deadline, first_response_at, resolved_at
+		FROM tickets
+		WHERE (response_deadline IS NOT NULL AND
+		       ((first_response_at IS NULL AND response_deadline < $1) OR first_response_at > response_deadline))
+		   OR (resolution_deadline IS NOT NULL AND
+		       ((resolved_at IS NULL AND resolution_deadline < $1) OR resolved_at > resolution_deadline))
+		ORDER BY LEAST(response_deadline, resolution_deadline), id
+	`
+	rows, err := r.getExecutor(ctx).QueryContext(ctx, query, now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find SLA violations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var result []domain.Ticket
+	for rows.Next() {
+		var ticket domain.Ticket
+		var statusID, priorityID int
+		if err := rows.Scan(
+			&ticket.ID, &ticket.UserID, &ticket.TopicID, &statusID, &priorityID,
+			&ticket.Amount, &ticket.Comment, &ticket.CreatedAt, &ticket.UpdatedAt,
+			&ticket.ResponseDeadline, &ticket.ResolutionDeadline,
+			&ticket.FirstResponseAt, &ticket.ResolvedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan SLA violation: %w", err)
+		}
+		ticket.Status = domain.Status(statusID)
+		ticket.Priority = domain.Priority(priorityID)
+		result = append(result, ticket)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate SLA violations: %w", err)
+	}
+	return result, nil
 }

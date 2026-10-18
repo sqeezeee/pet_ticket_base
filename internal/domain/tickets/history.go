@@ -12,6 +12,8 @@ const (
 	ActionUpdated           HistoryAction = "updated"
 	ActionPriorityChanged   HistoryAction = "priority_changed"
 	ActionPriorityEscalated HistoryAction = "priority_escalated"
+	ActionFirstResponse     HistoryAction = "first_response"
+	ActionResolved          HistoryAction = "resolved"
 )
 
 // History представляет запись в истории изменений тикета
